@@ -1,0 +1,574 @@
+---
+title: "Emission calculations for Burning Homes and Structural Materials"
+author: "Jamie Cast"
+output: html_document
+---
+
+```{r global-options}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE,
+                      eval=TRUE)
+```
+
+# Emission Factors for BHASMA
+
+In this markdown, I will be going through all of the raw data that we collected
+during this experiment and compile them into an emission factor database, while
+making stops along the way for some other useful metrics
+
+## Step 1: Data Gathering and Setup
+
+There are many steps to take before we can get close to any sort of emission factor
+calculation. 
+
+Do note: this script is an adaptaion of earlier work and some portions may not
+be implemented fully and will use outputs from the earlier work until it can be
+added to this document.
+
+To start, let's import the relevant libraries and global options
+
+```{r setup}
+rm(list = ls())
+library(tidyverse)
+```
+
+```{r important-vars}
+d_filter_cm <- 3.7 # the active diameter of our filters
+LOD_pm2.5 <- 3 # Limit of detection for our gravimetric analysis
+R <- 8.314 # universal gas constant in J/mol*K
+
+# define some of our molecular weights for later use
+MW_co2 <- 44.01
+MW_co <- 28.01
+MW_ch4 <- 16.04
+MW_nox <- 30.01
+MW_c <- 12.00
+```
+
+### Megadata
+
+For each experiment, there was a metadata spreadsheet that filled in information
+such as fuel info, combustion mode, and time stamps for specific events that
+happened during the experiment. To make tracking each experiment easier, we can
+compile each of these documents into one large spreadsheet, earning the fitting name:
+"megadata". 
+
+This work was originally done in Python, and for now will just be imported from
+there. **This will be changed in the future to happen here in R.** For now, we
+can just read in the .csv table.
+
+Programmers note: you'll probably want to use some functional programming for
+this to work properly. map_df will also be your friend
+
+```{r megadata}
+megadata <- read.csv(file = "./Data/Powerhouse/megadata.csv") %>%
+  rename(exp.num = Exp)
+```
+
+### Pressure and Temp
+
+This will be left blank for now. But here's where we will put the R code for 
+calculating the pressure and temp averages for each experiment
+
+```{r pressure-temp}
+PT <- read.csv(file = "./Data/Powerhouse/Pressure-Temp.csv") %>%
+  select(-Exp) %>%
+  rename(exp.num = Exp...,
+         Pressure_Pa = Pressure,
+         Temp_C = Temperature) %>%
+  
+  # Convert celsius into kelvin
+  mutate(Temp_C = Temp_C + 273.15) %>%
+  rename(Temp_K = Temp_C)
+```
+
+### Sample Volume
+
+Also during each experiment, we kept ~1Hz data for the mass flow rate of each
+Mass Flow Controller (MFC). Notably, this is measure as standard liters per minute,
+so we have to adjust for the local temperature and pressure during each experiment.
+This is done as an average across the duration of the experiment (since it doesn't
+really change that much during the course of an experiment). Temperature was measured
+with a temperature probe connected to the sample line that feeds into the filters.
+Pressure on the other hand, has to be taken from local weather stations. Frustratingly,
+this is given as sea level atmospheric pressure and so we must correct for the
+altitude of our lab.
+
+This work was originally done in Python, and for now will just be imported from
+there. **This will be changed in the future to happen here in R.** For now, we
+can just read in the .csv table.
+
+```{r volume-pressure-temp}
+samplevolume <- read.csv(file = "./Data/Powerhouse/samplevolume.csv") %>%
+  rename(exp.num = Exp...) %>%
+  select(-Exp.)
+```
+
+note: PT data seems to not have gaps, but there are a few experiments missing
+from the sample volume data. This can hopefully be remedied as that code is put
+into this script
+
+## Step 2: Sample Analysis
+
+Now that we have the background data and a bit more info on the environment of
+our tests, we can start actually looking at some of the samples that were collected
+during the experiment.
+
+So far, we can collect data from the following sources
+ - PM2.5 total mass
+ - OC/EC surface concentration
+ - Elemental Composition (XRF) surface concentration
+ - VOC volume concentration
+ 
+However, this is not all that is planned to be included in this data set, and as
+such this file will need to be updated as those pieces come together.
+
+Before having them come together though, we want to convert each of these measurement
+techniques to a ug/m3 concentration. For everything but the VOC analysis, this is
+done by calculating the total ug of that species and then dividing it by the
+sample volume of the corresponding filter channel which was calculated in step 1.
+
+For the VOC data, that is given in PPM which we can convert directly to ug/m3 using
+some fun maths.
+
+### Filter Analysis
+Step one of this process is going through the filter analysis that has been performed
+at CSU. This includes PM2.5, OC, EC, and XRF data. We'll load in the raw file
+and then edit it from there
+
+```{r filter-analysis}
+# start with PM2.5 measurements
+filter_ug <- read.csv(file = "./Data/Powerhouse/filter-data-CH5.csv") %>%
+  # remove BC column since it's not done yet
+  # also remove filter id since it's not needed
+  select(-bc_880_ugcm2, -gravi_filter_id) %>% 
+  
+  # rename test_id
+  rename(exp.num = test_id) %>%
+  mutate(exp.num = as.numeric(exp.num)) %>%
+  
+  # take an average of post filter weights and subtract average of starting weights
+  mutate(mass_1_post_ug = ((mass_1_post_ug + mass_2_post_ug + mass_3_post_ug)/3) -
+           ((mass_1_pre_ug + mass_2_pre_ug + mass_3_pre_ug)/3)) %>%
+  # it might seem like a weird choice to do this calculation under the name of
+  # mass_1_post_ug but the only reason is to keep the ordering in a way I like,
+  # it really doesn't need to be this way
+  rename(PM2.5_ug = mass_1_post_ug) %>%
+  
+  # set the absolute minimum value of PM2.5 to be equal to our LOD
+  mutate(PM2.5_ug = pmax(LOD_pm2.5,PM2.5_ug)) %>%
+  
+  # with that calculation complete we can remove the pre and post cols
+  select(-mass_2_post_ug,
+         -mass_3_post_ug,
+         -mass_1_pre_ug,
+         -mass_2_pre_ug,
+         -mass_3_pre_ug,) %>%
+
+# OC/EC analysis
+  
+  # calculate the total loading based off of the surface concentration
+  mutate(oc_ugcm2 = oc_ugcm2 * pi * (d_filter_cm^2) * 0.25) %>%
+  mutate(ec_ugcm2 = ec_ugcm2 * pi * (d_filter_cm^2) * 0.25) %>%
+  rename(OC_ug = oc_ugcm2,
+         EC_ug = ec_ugcm2) %>%
+
+# XRF analysis
+  
+  # rename all XRF columns to just their element with .ug as a suffix
+  rename_with(~ str_c(str_extract(.,pattern = "(?<=_).*?(?=_)"),"_ug"),
+              .cols = c(-exp.num,-PM2.5_ug,-OC_ug,-EC_ug)) %>%
+  
+  # convert XRF data into numerics by first extracting only numbers, and then
+  # converting using as.numeric
+  mutate(across(c(-exp.num,-PM2.5_ug,-OC_ug,-EC_ug), 
+                ~ sapply(str_extract_all(.,"[^\\[\\]]"), paste0, collapse = ""))) %>%
+  mutate(across(c(-exp.num,-PM2.5_ug,-OC_ug,-EC_ug), ~ as.numeric(.))) %>%
+
+  # convert each surface concentration into a loading by multiplying by filter
+  # area
+  mutate(across(c(-exp.num,-PM2.5_ug,-OC_ug,-EC_ug), 
+                ~ . * (pi * (d_filter_cm^2) * 0.25)))
+```
+
+Now the entirety of our filter data is in units of ug! Now we can move on to the
+VOC analysis
+
+### VOC Analysis
+
+Let's go ahead an import the raw data that we've recieved from our collaborators.
+We need to match the sample name of the summa canister with the experiment code
+given in the megadata. 
+
+```{r import-voc}
+voc_ugm3 <- read.csv(file = "./Data/Powerhouse/Summa-analyzed.csv")
+# this is in ug/m3
+```
+
+### Carbonyls
+
+Carbonyls are analyzed thanks to the Atmospheric Science department and Amy Sullivan
+here at CSU. Carbonyls are given in ug so most of this is just cleanup
+
+```{r carbonyl-analysis}
+carbonyls_ug <- readxl::read_excel(path = "./Data/Atmo-Science/BHASMA Carbonyl Data.xlsx") %>%
+  # takes the ID column and removes "Test" from each entry
+  mutate(ID = sapply(str_extract_all(ID,pattern = "[^Test]"), 
+                     function(x) paste0(x, collapse = ""))) %>%
+  rename(exp.num = ID) %>%
+  select(-"Burn Type")
+```
+
+That leaves us with all of the carbonyls in ug with a corresponding experiment
+number and nothing else, making it easy to incorporate into our other data
+
+### Atmo-Sci Filter
+
+Similar to carbonyls, this filter data comes from Atmospheric sciences (thank you!)
+and comes in the easy to handle ug units. A similar process as above can be
+done with this data set.
+
+However, this data set has a bit more going on in it, so we'll need to select
+the specific columns for the individual components that we want to analyze,
+including ions and WSOCs
+
+```{r ion-analysis}
+atmo_filter_data <- readxl::read_excel(path = "./Data/Atmo-Science/BHASMA Filter Data.xlsx") %>%
+  # can just copy and paste the functions from above for this first
+  mutate(ID = sapply(str_extract_all(ID,pattern = "[^Test]"), 
+                     function(x) paste0(x, collapse = ""))) %>%
+  rename(exp.num = ID) %>%
+  select(-"Burn Type")
+
+# from here, we can extract columns using their column number. Sadly, this is a 
+# manual process and will be needed to be adjusted if the number of columns changes
+# as more of this data comes in
+
+ions_ug <- select(.data = atmo_filter_data,
+               exp.num, 17:25)
+
+wsoc_ug <- select(.data = atmo_filter_data,
+               exp.num, 15)
+
+# we can go ahead and remove the old dataframe to keep the environment clean
+rm(atmo_filter_data)
+```
+## Step 3: Concentrations
+
+Now that the raw data has been collected, many of our samples are in ug, which is
+helpful except for the fact that we need ug/m3 for the final emission factor
+calculation. So, let's go through and divide each of these experiments by their
+corresponding sample volume to get our emission concentrations
+
+### Filter Concentrations
+
+```{r filter-concentrations}
+filter_ugm3 <- filter_ug %>%
+  # first, we add in the sample volume information using a merge
+  merge(samplevolume, by = "exp.num") %>%
+  # starting with PM2.5, this sample used channel 5
+  mutate(PM2.5_ug = PM2.5_ug/CH5) %>%
+  rename(PM2.5_ugm3 = PM2.5_ug) %>%
+  
+  # we can continue this with the oc/ec data, which was taken on channel 6
+  mutate(OC_ug = OC_ug/CH6,
+         EC_ug = EC_ug/CH6) %>%
+  rename(OC_ugm3 = OC_ug,
+         EC_ugm3 = EC_ug) %>%
+  
+  # now we can move onto the XRF data, which corresponds to CH5
+  # first define what columns we don't want
+
+  mutate(across(.cols = -c(exp.num,PM2.5_ugm3,OC_ugm3,EC_ugm3,
+                  CH1,CH2,CH3,CH4,CH5,CH6,CH7),
+                ~ .x / CH6)) %>%
+  # now we can rename all of these columns
+  rename_with(~ str_c(str_extract(., pattern = ".*(?=_ug)"),
+                      "_ugm3"),
+              .cols = -c(exp.num,PM2.5_ugm3,OC_ugm3,EC_ugm3,
+                  CH1,CH2,CH3,CH4,CH5,CH6,CH7)) %>%
+  
+  # we've converted everything in this data frame, let's get rid of the sample
+  # volume columns
+  select(-c(CH1,CH2,CH3,CH4,CH5,CH6,CH7))
+```
+
+### Carbonyls
+
+```{r carbonyl-concentrations}
+carbonyls_ugm3 <- carbonyls_ug %>%
+  # merge with sample volume data
+  # since all carbonyl data is from CH7, we can filter that when we add it
+  merge(select(.data = samplevolume,
+               exp.num,CH7), 
+        by = "exp.num") %>%
+  
+  # divide everything by sample volume
+  mutate(across(.cols = -c(CH7,exp.num),
+                ~ .x / CH7)) %>%
+  # rename our columns
+  rename_with(.cols = -c(exp.num,CH7),
+              ~ str_c(str_extract(., pattern = ".*(?= \\(ug)"),
+                      "_ugm3")) %>%
+  # and we can finally remove our sample volume column
+  select(-CH7)
+```
+
+### Ions
+
+```{r ion-concentrations}
+ions_ugm3 <- ions_ug %>%
+  # ions were captured on CH4
+  merge(select(.data = samplevolume,
+               exp.num,CH4),
+        by = "exp.num") %>%
+  # divide by sample volume
+  mutate(across(.cols = -c(exp.num,CH4),
+                ~ .x / CH4)) %>%
+  # rename columns
+  rename_with(.cols = -c(exp.num,CH4),
+              ~ str_c(str_extract(., pattern = ".*(?= \\(ug)"),
+                      "_ugm3")) %>%
+  # remove sample volume columns
+  select(-CH4)
+```
+
+## Step 3.5: Summary Data
+
+This is just an automated process for creating the PM2.5,OC,EC spreadsheet that
+we can share with our collaborators
+
+```{r summary-data}
+# let's start with our megadata and work off of that
+summary_data <- megadata %>%
+  select(exp.num, Date, Time, Fuel.Category, Fuel.Material, Combustion.Mode) %>%
+  
+  # merge this with individual columns from the other data frames 
+  
+  # PM2.5 (ug/cm2)
+  merge(select(.data = filter_ug, exp.num, PM2.5_ug), 
+        by = "exp.num",
+        all.x = TRUE) %>%
+  mutate(PM2.5_ug = PM2.5_ug/(pi * (d_filter_cm^2) * 0.25)) %>%
+  rename(PM2.5_ugcm2 = PM2.5_ug) %>%
+  
+  # PM2.5 (ug)
+  merge(select(.data = filter_ug, exp.num, PM2.5_ug), 
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  # PM2.5 (ug/m3)
+  merge(select(.data = filter_ugm3, exp.num, PM2.5_ugm3),
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  
+  # OC (ug/cm2)
+  merge(select(.data = filter_ug, exp.num, OC_ug), 
+        by = "exp.num",
+        all.x = TRUE) %>%
+  mutate(OC_ug = OC_ug/(pi * (d_filter_cm^2) * 0.25)) %>%
+  rename(OC_ugcm2 = OC_ug) %>%
+  
+  # OC (ug)
+  merge(select(.data = filter_ug, exp.num, OC_ug), 
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  # OC (ug/m3)
+  merge(select(.data = filter_ugm3, exp.num, OC_ugm3),
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  
+  # EC (ug/cm2)
+  merge(select(.data = filter_ug, exp.num, EC_ug), 
+        by = "exp.num",
+        all.x = TRUE) %>%
+  mutate(EC_ug = EC_ug/(pi * (d_filter_cm^2) * 0.25)) %>%
+  rename(EC_ugcm2 = EC_ug) %>%
+  
+  # EC (ug)
+  merge(select(.data = filter_ug, exp.num, EC_ug), 
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  # EC (ug/m3)
+  merge(select(.data = filter_ugm3, exp.num, EC_ugm3),
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  
+  # carbonyls (ug)
+  #merge(carbonyls_ug,
+   #     by = "exp.num",
+    #    all.x = TRUE) %>%
+  
+  # carbonyls (ug/m3)
+  merge(carbonyls_ugm3,
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  
+  # ions (ug)
+ # merge(ions_ug,
+  #      by = "exp.num",
+   #     all.x = TRUE) %>%
+  
+  # ions (ug/m3)
+  merge(ions_ugm3,
+        by = "exp.num",
+        all.x = TRUE) %>%
+  
+  
+  # sample volume info
+  merge(select(.data = samplevolume,
+               exp.num,CH5,CH6,CH3,CH4,CH7),
+        by = "exp.num") %>%
+  rename("PM2.5 Sample Volume (m3)" = CH5,
+         "OC/EC, UCB Sample Volume (m3)" = CH6,
+         "UCI Sample Volume (m3)" = CH3,
+         "Ion Sample Volume (m3)" = CH4,
+         "Carbonyl Sample Volume (m3)" = CH7) %>%
+  
+    # some column renaming just for clarity
+  rename("Exp num" = exp.num,
+         "Combustion Mode" = Combustion.Mode,
+         "Fuel Material" = Fuel.Material,
+         "Fuel Category" = Fuel.Category) %>%
+  
+  # clean up NAs and INFs
+  mutate_if(is.numeric, ~ replace_na(., 0) %>% 
+                             replace(., is.infinite(.), 0))
+
+# finish this off by saving it to a spreadsheet
+write.csv(summary_data, file = "./Outputs/Data-summary.csv",
+          row.names = FALSE)
+```
+
+## Step 4: Gas Emissions
+
+A crucial part of the emission factor calculations is the amount of carbon based
+gases that were emitted during the experiment. This is a useful metric on its own,
+but its also how we estimate the amount of carbon that has been burned during our
+experiment.
+
+Thanks to Kevin, this data has already been processed from the raw data files
+collected by our gas analyzer. My task here is to just import the data (which is
+in ppm) and convert it to ug/m3 and then apply that to the calculations where it
+is relevant
+
+### Raw Data and Proccessing
+
+```{r gas-emissions}
+gas_raw <- read.csv(file = "./Data/Powerhouse/gas-Emissions.csv") %>%
+  
+  # choose which columns are relevant and rename them a bit
+  select(X0,dco2,dco,dch4,dnox) %>%
+  rename(exp.num = X0,
+         CO2_ppm = dco2,
+         CO_ppm = dco,
+         CH4_ppm = dch4,
+         NOx_ppb = dnox)
+
+# we'll need to know the pressure and temp since we're doing a ppb/ppm to ug/m3
+# conversion. This is stored in the PT data frame created in step 1.
+# We can then merge the two data frames based on the experiment numbers
+gas_ugm3 <- merge(gas_raw,
+                  PT,
+                  by = "exp.num",
+                  all.x = TRUE) %>%
+  # to convert to ug/m3, multiply ppm by the molecular weight and divide by
+  # 24.45 (molar volume of an ideal gas at STP) and then multiply everything
+  # by the temperature in kelvin divided by the pressure in Pascals
+  # ^ DOUBLE CHECK THIS
+  
+  # As with the other processes, convert the number itself before renaming it
+  mutate(CO2_ppm = ((CO2_ppm * MW_co2 * (Pressure_Pa / R) / Temp_K)),
+         CO_ppm = ((CO_ppm * MW_co * (Pressure_Pa / R) / Temp_K)),
+         CH4_ppm = ((CH4_ppm * MW_ch4 * (Pressure_Pa / R) / Temp_K)),
+         NOx_ppb = ((NOx_ppb * 0.001 * MW_nox * (Pressure_Pa / R) / Temp_K))) %>%
+  
+  rename(CO2_ugm3 = CO2_ppm,
+         CO_ugm3 = CO_ppm,
+         CH4_ugm3 = CH4_ppm,
+         NOx_ugm3 = NOx_ppb) %>%
+  
+  # let's make sure our NAs turn into zeros as it will mess up further calculations
+  # if they're left alone
+  mutate_all(~ replace_na(., 0)) %>%
+  
+  # we can also get rid of negative emissions 
+  mutate_all(~ pmax(.,0)) %>%
+  
+  # remove old columns
+  select(-Temp_K,
+         -Pressure_Pa)
+```
+
+### dX Calculations
+
+To make things easier, we're going to do one of the steps of the EF calculations
+here and put it in a data frame for later use. Here we will be creating the 'dX'
+portion of the calculations (the denominator) which tells us how many grams of
+carbon were emitted during the experiment.
+
+To complete this calculation, each gas emission will be divided by its molecular
+weight and then summed together before multiplying that all by the molecular
+weight of carbon
+
+```{r dX-calcultions}
+dX <- gas_ugm3 %>%
+  # start by loading in the gas concentrations, the rest of these calculations
+  # should be fairly simple to do
+  
+  # define our 'dX' column as the sum of each emission divided by the molecular weight
+  mutate(dX = (CO2_ugm3 / MW_co2
+               + CO_ugm3 / MW_co
+               + CH4_ugm3 / MW_ch4 # this data is a bit sketchy right now so 
+               + NOx_ugm3 / MW_nox  # we can exclude if we want to
+               )) %>%
+  
+  # multiply by the molecular weight of carbon to get ug of carbon in all of the
+  # emissions
+  mutate(dX = dX * MW_c) %>%
+  
+  # now delete the old columns since they aren't needed anymore
+  select(-CO2_ugm3,
+         -CO_ugm3,
+         -CH4_ugm3,
+         -NOx_ugm3)
+```
+
+## Step 5: Emission Factors
+
+We can finally calculate our emission factors!! We have our emissions concentrations,
+the estimation of fuel burned through the dX calculations, the only missing piece
+is carbon fractions. 
+
+### Carbon Fractions
+
+This information is being provided through material analysis
+done by Hazen research labs. This is simply stored in a csv table by material
+
+```{r carbon-fractions}
+carbon_fractions <- read.csv("./Data/carbon-fractions.csv")
+```
+
+
+### EFs
+
+```{r EFs}
+filter_gkg <- megadata %>%
+  # base this off the megadata so we can grab material info along with experiment
+  # number
+  select(exp.num,Fuel.Material) %>%
+  
+  # take the filter concentrations and tack on the carbon fraction by material,
+  # and dX by experiment
+  merge(dX, by = "exp.num", all.x = TRUE) %>%
+  merge(carbon_fractions, by = "Fuel.Material", all.x = TRUE) %>%
+  
+  # introduce all our data
+  merge(filter_ugm3, by = "exp.num", all.x = TRUE) %>%
+  merge(ions_ugm3, by = "exp.num", all.x = TRUE)
+```

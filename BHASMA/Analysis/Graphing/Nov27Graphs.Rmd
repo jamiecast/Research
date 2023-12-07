@@ -1,0 +1,81 @@
+# Graphs for the Nov 27 update meeting
+
+To be used with ../EmissionFactors.Rmd please make sure the environment variables
+are loaded in from this script before running this one
+
+## Blank Corrections
+
+Let's examine our blanks one last time 
+
+```{r blanks}
+blanks <- summary_data %>%
+  select("Exp num","Fuel Material","Combustion Mode",PM2.5_ug, PM2.5_ugm3) %>%
+  rename(Fuel.Material = "Fuel Material",
+         Combustion.Mode = "Combustion Mode") %>%
+  filter(str_detect(Fuel.Material, pattern = "Blank"),
+         Combustion.Mode != "NA")
+```
+
+## Example Data: Southern Yellow Pine
+```{r SYP}
+SYP <- summary_data %>%
+  select("Fuel Material",
+         "Combustion Mode",
+         PM2.5_ug,
+         PM2.5_ugm3) %>%
+  rename(Fuel.Material = "Fuel Material",
+         Combustion.Mode = "Combustion Mode") %>%
+  filter(Fuel.Material == "SYP") %>%
+  select(-Fuel.Material)
+```
+
+```{r graphing}
+ggplot(data = blanks) +
+  geom_jitter(aes(x = Combustion.Mode,
+                 y = PM2.5_ugm3,
+                 shape = Combustion.Mode,
+                 col = "Blanks"),
+             size = 10,
+             alpha = 0.5,
+             width = 0.05,
+             height = 0) +
+  
+  geom_jitter(data = SYP,
+              aes(x = Combustion.Mode,
+                  y = PM2.5_ugm3,
+                  col = "SYP",
+                  shape = Combustion.Mode),
+              size = 10,
+             alpha = 0.5,
+             width = 0.05,
+             height = 0) +
+  
+  # set our y axis scale and info here
+  scale_y_log10() +
+  
+  # title and axis labels
+  labs(title = "Blank Concentrations",
+       #subtitle = "With comparisons to southern yellow pine",
+       x = "Combustion Mode",
+       y = expression("PM"[2.5]*" ("*mu*"g) "*m^-3)) + # PM_2.5 (ug)
+  
+  # manual control over x axis categories
+  scale_x_discrete(labels = c("Flaming",
+                              "Pyrolysis",
+                              "None")) +
+  
+  # theme stuffs
+  theme_bw() +
+  scale_shape_manual(name = "Shape",
+                     values = c(16,18)) +
+  
+  scale_color_discrete(name = "Combustion Mode") +
+  theme(
+    #legend.position = "none",
+        
+        axis.title = element_text(size = 20),
+        
+        axis.text = element_text(size = 16),
+        title = element_text(size = 20),
+        legend.text = element_text(size = 16))
+```

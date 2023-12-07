@@ -1,0 +1,64 @@
+# Time series of blanks with references to other experiments
+(requires EmissionFactors.Rmd to be able to run)
+
+## Collect blank data with reference to time
+
+```{r}
+exps <- megadata %>%
+  select(exp.num, Fuel.Material, Date, Time) %>%
+  
+  # convert date and time columns to a single column that is a datetime object
+  mutate(datetime = lubridate::mdy_hms(paste(Date,Time))) %>%
+  select(-Date,-Time) %>%
+  
+  # combine with PM2.5 concentrations
+  merge(select(.data = filter_ugm3,
+               exp.num, PM2.5_ugm3),
+        by = "exp.num",
+        )
+
+blanks <- exps %>%
+  filter(str_detect(Fuel.Material, pattern = "Blank"))
+
+blank_exps <- blanks$exp.num
+
+prev_exps <- blank_exps - 1
+
+prev <- exps %>%
+  filter(exp.num %in% prev_exps)
+```
+
+## Graphs!
+
+Plot a time series across the campaign with points from the previous experiments
+
+```{r}
+ggplot() +
+  geom_point(data = blanks,
+             aes(x = datetime,
+                 y = PM2.5_ugm3),
+             col = "#D81B60",
+             size = 5) +
+  geom_point(data = prev,
+             aes(x = datetime,
+                 y = PM2.5_ugm3,
+                 shape = Fuel.Material),
+             col = "#1E88E5",
+             size = 4,
+             stroke = 1.2) +
+  
+  scale_y_log10() +
+  
+  theme_bw() +
+  
+  scale_shape_manual(values = c(1,2,3,4,5,6,7,8),
+                     name = "Previous Exp. Fuel") +
+  
+  labs(title = "Blank Concentrations Compared to Previous Experiment",
+       x = "Date",
+       y = expression("PM"[2.5]*" ("*mu*"g) "*m^-3)) +
+  
+  theme(axis.title = element_text(size = 16),
+        title = element_text(size = 14),
+        axis.text = element_text(size = 12))
+```
